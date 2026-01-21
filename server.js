@@ -729,7 +729,7 @@ async function generateHuggingFaceVideo(videoId) {
 
     // Use Hugging Face's text-to-video model (Ali-Vilab/text-to-video-ms-1.7b)
     const response = await fetch(
-      "https://api-inference.huggingface.co/models/ali-vilab/text-to-video-ms-1.7b",
+      "https://router.huggingface.co/hf-inference/models/ali-vilab/text-to-video-ms-1.7b",
       {
         headers: {
           Authorization: `Bearer ${HUGGINGFACE_API_KEY}`,
@@ -785,8 +785,8 @@ async function generatePlaceholderVideo(videoId, topic) {
   const tempPath = path.join(TEMP_DIR, `${videoId}.mp4`);
   
   try {
-    // Download a sample video from a public source as placeholder
-    const sampleVideoUrl = 'https://www.w3schools.com/html/mov_bbb.mp4';
+    // Download a sample video from a reliable public source
+    const sampleVideoUrl = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4';
     const response = await fetch(sampleVideoUrl);
     
     if (response.ok) {

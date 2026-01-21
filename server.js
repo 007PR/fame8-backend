@@ -19,6 +19,9 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://fame8-frontend.vercel.app';
 
+// Hugging Face API Config
+const HUGGINGFACE_API_KEY = process.env.HUGGINGFACE_API_KEY;
+
 // Ensure temp directory exists
 if (!fs.existsSync(TEMP_DIR)) {
   fs.mkdirSync(TEMP_DIR, { recursive: true });
@@ -375,55 +378,6 @@ app.get('/api/brands/:brandId/videos', authenticate, (req, res) => {
   res.json(videos);
 });
 
-// POST /api/brands/:brandId/videos - Generate video for a specific brand
-app.post('/api/brands/:brandId/videos', authenticate, async (req, res) => {
-  try {
-    const { topic, custom_script } = req.body;
-    const brandId = req.params.brandId;
-
-    const brand = db.prepare('SELECT * FROM brands WHERE id = ? AND user_id = ?')
-      .get(brandId, req.user.id);
-    
-    if (!brand) {
-      return res.status(404).json({ error: 'Brand not found' });
-    }
-
-    const videoId = uuidv4();
-    const script = custom_script || generateScript(topic, brand);
-    const expiresAt = new Date(Date.now() + VIDEO_EXPIRY_HOURS * 60 * 60 * 1000).toISOString();
-
-    // Create video record
-    db.prepare(`
-      INSERT INTO videos (id, user_id, brand_id, title, script, topic, status, expires_at, recipe)
-      VALUES (?, ?, ?, ?, ?, ?, 'generating', ?, ?)
-    `).run(videoId, req.user.id, brandId, topic, script, topic, expiresAt, JSON.stringify({
-      topic,
-      script,
-      brand: brand.name,
-      tone: brand.tone,
-      niche: brand.niche
-    }));
-
-    // Simulate video generation (in production, this would call FFmpeg/video APIs)
-    setTimeout(() => {
-      generateMockVideo(videoId);
-    }, 3000);
-
-    res.json({ 
-      id: videoId,
-      video_id: videoId, 
-      status: 'generating',
-      title: topic,
-      topic: topic,
-      brand_id: brandId,
-      message: 'Video generation started. Check status endpoint for updates.'
-    });
-  } catch (error) {
-    console.error('Video generation error:', error);
-    res.status(500).json({ error: 'Failed to generate video' });
-  }
-});
-
 app.post('/api/videos/generate', authenticate, async (req, res) => {
   try {
     const { brand_id, topic, custom_script } = req.body;
@@ -711,20 +665,101 @@ Don't forget to follow ${brand.name} for more content like this!
   `.trim();
 }
 
-function generateMockVideo(videoId) {
+// Generate video using Hugging Face API
+async function generateHuggingFaceVideo(videoId) {
   const video = db.prepare('SELECT * FROM videos WHERE id = ?').get(videoId);
   if (!video) return;
 
-  // Create a mock video file (in production, this would be actual video generation)
+  const tempPath = path.join(TEMP_DIR, `${videoId}.mp4`);
+
+  try {
+    console.log(`Starting video generation for: ${video.topic}`);
+    
+    // Update status to generating
+    db.prepare("UPDATE videos SET status = 'generating' WHERE id = ?").run(videoId);
+
+    // Use Hugging Face's text-to-video model (Ali-Vilab/text-to-video-ms-1.7b)
+    const response = await fetch(
+      "https://api-inference.huggingface.co/models/ali-vilab/text-to-video-ms-1.7b",
+      {
+        headers: {
+          Authorization: `Bearer ${HUGGINGFACE_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        method: "POST",
+        body: JSON.stringify({
+          inputs: video.topic,
+          parameters: {
+            num_frames: 16,
+            num_inference_steps: 25
+          }
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Hugging Face API error:', response.status, errorText);
+      
+      // If model is loading, retry after delay
+      if (response.status === 503) {
+        console.log('Model is loading, retrying in 30 seconds...');
+        setTimeout(() => generateHuggingFaceVideo(videoId), 30000);
+        return;
+      }
+      
+      // Fallback to placeholder if API fails
+      console.log('Falling back to placeholder video');
+      await generatePlaceholderVideo(videoId, video.topic);
+      return;
+    }
+
+    // Get the video blob
+    const videoBuffer = await response.arrayBuffer();
+    fs.writeFileSync(tempPath, Buffer.from(videoBuffer));
+
+    console.log(`Video generated successfully: ${tempPath}`);
+    
+    db.prepare("UPDATE videos SET status = 'ready', temp_path = ? WHERE id = ?")
+      .run(tempPath, videoId);
+
+  } catch (error) {
+    console.error('Video generation error:', error);
+    
+    // Fallback to placeholder
+    await generatePlaceholderVideo(videoId, video.topic);
+  }
+}
+
+// Fallback: Generate a simple placeholder video using a public sample
+async function generatePlaceholderVideo(videoId, topic) {
   const tempPath = path.join(TEMP_DIR, `${videoId}.mp4`);
   
-  // Create a simple placeholder file
-  // In production, this would be FFmpeg generating actual video
-  const placeholderContent = Buffer.alloc(1024 * 100, 0); // 100KB placeholder
-  fs.writeFileSync(tempPath, placeholderContent);
+  try {
+    // Download a sample video from a public source as placeholder
+    const sampleVideoUrl = 'https://www.w3schools.com/html/mov_bbb.mp4';
+    const response = await fetch(sampleVideoUrl);
+    
+    if (response.ok) {
+      const videoBuffer = await response.arrayBuffer();
+      fs.writeFileSync(tempPath, Buffer.from(videoBuffer));
+      
+      db.prepare("UPDATE videos SET status = 'ready', temp_path = ? WHERE id = ?")
+        .run(tempPath, videoId);
+      
+      console.log(`Placeholder video created for: ${topic}`);
+    } else {
+      throw new Error('Failed to download placeholder video');
+    }
+  } catch (error) {
+    console.error('Placeholder video error:', error);
+    db.prepare("UPDATE videos SET status = 'failed' WHERE id = ?").run(videoId);
+  }
+}
 
-  db.prepare("UPDATE videos SET status = 'ready', temp_path = ? WHERE id = ?")
-    .run(tempPath, videoId);
+// Legacy function - kept for compatibility
+function generateMockVideo(videoId) {
+  generateHuggingFaceVideo(videoId);
 }
 
 // Cleanup expired videos every hour

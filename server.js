@@ -375,6 +375,55 @@ app.get('/api/brands/:brandId/videos', authenticate, (req, res) => {
   res.json(videos);
 });
 
+// POST /api/brands/:brandId/videos - Generate video for a specific brand
+app.post('/api/brands/:brandId/videos', authenticate, async (req, res) => {
+  try {
+    const { topic, custom_script } = req.body;
+    const brandId = req.params.brandId;
+
+    const brand = db.prepare('SELECT * FROM brands WHERE id = ? AND user_id = ?')
+      .get(brandId, req.user.id);
+    
+    if (!brand) {
+      return res.status(404).json({ error: 'Brand not found' });
+    }
+
+    const videoId = uuidv4();
+    const script = custom_script || generateScript(topic, brand);
+    const expiresAt = new Date(Date.now() + VIDEO_EXPIRY_HOURS * 60 * 60 * 1000).toISOString();
+
+    // Create video record
+    db.prepare(`
+      INSERT INTO videos (id, user_id, brand_id, title, script, topic, status, expires_at, recipe)
+      VALUES (?, ?, ?, ?, ?, ?, 'generating', ?, ?)
+    `).run(videoId, req.user.id, brandId, topic, script, topic, expiresAt, JSON.stringify({
+      topic,
+      script,
+      brand: brand.name,
+      tone: brand.tone,
+      niche: brand.niche
+    }));
+
+    // Simulate video generation (in production, this would call FFmpeg/video APIs)
+    setTimeout(() => {
+      generateMockVideo(videoId);
+    }, 3000);
+
+    res.json({ 
+      id: videoId,
+      video_id: videoId, 
+      status: 'generating',
+      title: topic,
+      topic: topic,
+      brand_id: brandId,
+      message: 'Video generation started. Check status endpoint for updates.'
+    });
+  } catch (error) {
+    console.error('Video generation error:', error);
+    res.status(500).json({ error: 'Failed to generate video' });
+  }
+});
+
 app.post('/api/videos/generate', authenticate, async (req, res) => {
   try {
     const { brand_id, topic, custom_script } = req.body;
